@@ -5,7 +5,14 @@ from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message, 
+    CallbackQuery, 
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton,
+    BusinessConnection,
+    BusinessMessagesDeleted
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -406,6 +413,134 @@ async def callback_analyze(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(f"{title}:\n\n{result}")
     await callback.message.answer("Выберите действие:", reply_markup=get_chat_actions_keyboard(chat_id))
     await callback.answer()
+
+
+# === Telegram Business обработчики ===
+
+@dp.business_connection()
+async def handle_business_connection(business_connection: BusinessConnection):
+    """Обработка подключения Telegram Business"""
+    logger.info(f"Business connection: {business_connection.id} from user {business_connection.user.id}")
+    
+    if business_connection.is_enabled:
+        # Сохраняем подключение
+        await db.add_business_connection(
+            connection_id=business_connection.id,
+            user_id=business_connection.user.id,
+            user_chat_id=business_connection.user_chat_id
+        )
+        logger.info(f"Business connection {business_connection.id} activated")
+    else:
+        # Удаляем подключение
+        await db.remove_business_connection(business_connection.id)
+        logger.info(f"Business connection {business_connection.id} deactivated")
+
+
+@dp.business_message(F.voice)
+async def handle_business_voice(message: Message):
+    """Обработка голосовых сообщений из Telegram Business"""
+    if not message.business_connection_id:
+        return
+    
+    # Проверяем, есть ли активное подключение
+    connection = await db.get_business_connection(message.business_connection_id)
+    if not connection:
+        logger.warning(f"Business connection {message.business_connection_id} not found")
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id if message.from_user else 0
+    
+    # Проверяем, включена ли транскрибация
+    if not await db.is_transcription_enabled(chat_id):
+        await db.add_message(
+            chat_id=chat_id,
+            user_id=user_id,
+            message_date=datetime.fromtimestamp(message.date.timestamp()),
+            is_voice=True
+        )
+        return
+    
+    # Сохраняем информацию о чате
+    await db.add_chat(
+        chat_id=chat_id,
+        chat_type="business",
+        title=message.chat.title or message.chat.first_name or "Business Chat"
+    )
+    
+    try:
+        # Скачиваем голосовое сообщение
+        voice_file = await bot.get_file(message.voice.file_id)
+        voice_path = f"/tmp/voice_{message.voice.file_id}.ogg"
+        await bot.download_file(voice_file.file_path, voice_path)
+        
+        logger.info(f"Transcribing business voice message from chat {chat_id}")
+        
+        # Транскрибируем
+        transcription = await transcribe_audio(voice_path)
+        
+        # Удаляем временный файл
+        if os.path.exists(voice_path):
+            os.remove(voice_path)
+        
+        # Сохраняем в БД
+        await db.add_message(
+            chat_id=chat_id,
+            user_id=user_id,
+            message_date=datetime.fromtimestamp(message.date.timestamp()),
+            is_voice=True,
+            transcription=transcription
+        )
+        
+        # Отправляем результат в business чат
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"📝 Транскрибация:\n\n{transcription}",
+            business_connection_id=message.business_connection_id,
+            reply_to_message_id=message.message_id
+        )
+        
+        logger.info(f"Business voice transcription completed for chat {chat_id}")
+        
+    except Exception as e:
+        logger.error(f"Error processing business voice message: {e}")
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Ошибка при обработке голосового сообщения: {str(e)}",
+                business_connection_id=message.business_connection_id,
+                reply_to_message_id=message.message_id
+            )
+        except:
+            pass
+
+
+@dp.business_message(F.text)
+async def handle_business_text(message: Message):
+    """Обработка текстовых сообщений из Telegram Business"""
+    if not message.business_connection_id:
+        return
+    
+    connection = await db.get_business_connection(message.business_connection_id)
+    if not connection:
+        return
+    
+    chat_id = message.chat.id
+    user_id = message.from_user.id if message.from_user else 0
+    
+    # Сохраняем чат и сообщение
+    await db.add_chat(
+        chat_id=chat_id,
+        chat_type="business",
+        title=message.chat.title or message.chat.first_name or "Business Chat"
+    )
+    
+    await db.add_message(
+        chat_id=chat_id,
+        user_id=user_id,
+        message_text=message.text,
+        message_date=datetime.fromtimestamp(message.date.timestamp())
+    )
 
 
 # === Главная функция ===

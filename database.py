@@ -57,6 +57,17 @@ class Database:
                 )
             """)
 
+            # Таблица business подключений
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS business_connections (
+                    connection_id VARCHAR(255) PRIMARY KEY,
+                    user_id BIGINT,
+                    user_chat_id BIGINT,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Таблица результатов анализа
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS analysis_results (
@@ -180,6 +191,38 @@ class Database:
                 LIMIT $2
             """, chat_id, limit)
             return [dict(row) for row in rows]
+
+    # === Business Connection Operations ===
+    
+    async def add_business_connection(
+        self,
+        connection_id: str,
+        user_id: int,
+        user_chat_id: int
+    ):
+        """Добавление или обновление business подключения"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO business_connections (connection_id, user_id, user_chat_id, is_active)
+                VALUES ($1, $2, $3, TRUE)
+                ON CONFLICT (connection_id) DO UPDATE
+                SET user_id = $2, user_chat_id = $3, is_active = TRUE
+            """, connection_id, user_id, user_chat_id)
+
+    async def remove_business_connection(self, connection_id: str):
+        """Удаление business подключения"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE business_connections SET is_active = FALSE WHERE connection_id = $1
+            """, connection_id)
+
+    async def get_business_connection(self, connection_id: str) -> Optional[Dict[str, Any]]:
+        """Получение информации о business подключении"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT * FROM business_connections WHERE connection_id = $1 AND is_active = TRUE
+            """, connection_id)
+            return dict(row) if row else None
 
 
 # Глобальный экземпляр базы данных
